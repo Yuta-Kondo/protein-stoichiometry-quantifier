@@ -1,0 +1,10 @@
+PyQt6
+numpy
+pandas
+matplotlib
+scipy
+scikit-learn
+pyvista
+plotly
+vtk
+h5py

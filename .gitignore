@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+exported_data.csv
+WORK_SUMMARY.md
+.claude/

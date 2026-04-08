@@ -2,6 +2,21 @@ import pyvista as pv
 import numpy as np
 import plotly.graph_objects as go
 
+# ADDED: deterministic color per cluster ID — same algorithm as main.py/_cluster_color
+def _cluster_color(cluster_id):
+    golden_ratio = 0.618033988749895
+    hue = (cluster_id * golden_ratio) % 1.0
+    h = hue * 6
+    c, m = 0.8, 0.2
+    x = c * (1 - abs(h % 2 - 1))
+    if   h < 1: r, g, b = c, x, 0
+    elif h < 2: r, g, b = x, c, 0
+    elif h < 3: r, g, b = 0, c, x
+    elif h < 4: r, g, b = 0, x, c
+    elif h < 5: r, g, b = x, 0, c
+    else:        r, g, b = c, 0, x
+    return (r + m, g + m, b + m)
+
 def update_plot_pyvista(df, sphere_radius=20):
     # Extract X, Y, and time frame positions
     x_positions = df.iloc[:, 0].to_numpy()
@@ -15,23 +30,25 @@ def update_plot_pyvista(df, sphere_radius=20):
     sphere = pv.Sphere(radius=sphere_radius)
 
     # Use glyphs to duplicate the sphere at each point's position
-    glyphs = points.glyph(scale=False, geom=sphere)
+    glyphs = points.glyph(scale=False, geom=sphere, orient=False)  # FIXED: suppress orient warning
 
     # Create a plotter and add the glyphs
     plotter = pv.Plotter()
     plotter.add_mesh(glyphs, color="blue")  # Adjust color as needed
 
-    labels = dict(zlabel='Time (frame)', xlabel='X position (nm)', ylabel='Y position (nm)')
-    plotter.show_grid(**labels)
-    plotter.add_axes(**labels)
+    # FIXED: show_grid uses xtitle/ytitle/ztitle; add_axes uses xlabel/ylabel/zlabel
+    plotter.show_grid(xtitle='X position (nm)', ytitle='Y position (nm)', ztitle='Time (frame)')
+    plotter.add_axes(xlabel='X position (nm)', ylabel='Y position (nm)', zlabel='Time (frame)')
     plotter.camera_position = 'xy'  # View from top-down perspective
     plotter.show()
 
 
-def visualize_spatial_clusters_pyvista(all_temporal_clusters, df, sphere_radius=20):
+# MODIFIED: added cluster_ids parameter for deterministic color coding by cluster ID
+def visualize_spatial_clusters_pyvista(all_temporal_clusters, df, sphere_radius=20, cluster_ids=None):
     plotter = pv.Plotter()
+    unique_ids = np.unique(cluster_ids) if cluster_ids is not None else None
 
-    for _, cluster in enumerate(all_temporal_clusters):
+    for i, cluster in enumerate(all_temporal_clusters):
         x_coords = []
         y_coords = []
         z_coords = []
@@ -42,29 +59,45 @@ def visualize_spatial_clusters_pyvista(all_temporal_clusters, df, sphere_radius=
                 y_coords.append(df.iloc[index, 1])
                 z_coords.append(time_frame)
 
-        # Create a point cloud
+        if not x_coords:
+            continue
+
         points = pv.PolyData(np.column_stack((x_coords, y_coords, z_coords)))
-
-        # Create a sphere glyph
         sphere = pv.Sphere(radius=sphere_radius)
-        glyphs = points.glyph(scale=False, geom=sphere)
+        glyphs = points.glyph(scale=False, geom=sphere, orient=False)  # FIXED: suppress orient warning
 
-        # Assign a unique color to the glyph
-        color = np.random.rand(3)
+        # MODIFIED: use deterministic color based on cluster ID, grey for noise
+        if unique_ids is not None:
+            cid = unique_ids[i]
+            color = 'grey' if cid == -1 else _cluster_color(int(cid))
+            label = 'Noise' if cid == -1 else f'Cluster {int(cid)}'
+        else:
+            color = np.random.rand(3)
+            label = f'Cluster {i}'
 
-        # Add the glyph to the plotter
-        plotter.add_mesh(glyphs, color=color)
+        plotter.add_mesh(glyphs, color=color, label=label)
 
-    labels = dict(zlabel='Time (frame)', xlabel='X position (nm)', ylabel='Y position (nm)')
-    plotter.show_grid(**labels)
-    plotter.add_axes(**labels)
-    plotter.camera_position = 'xy'  # View from top-down perspective
+    # FIXED: show_grid uses xtitle/ytitle/ztitle; add_axes uses xlabel/ylabel/zlabel
+    plotter.show_grid(xtitle='X position (nm)', ytitle='Y position (nm)', ztitle='Time (frame)')
+    plotter.add_axes(xlabel='X position (nm)', ylabel='Y position (nm)', zlabel='Time (frame)')
+    plotter.add_legend()
+    plotter.camera_position = 'xy'
     plotter.show()
 
-def visualize_temporal_clusters_pyvista(all_temporal_clusters, df, sphere_radius=20):
+# MODIFIED: added cluster_ids parameter for deterministic color coding by cluster ID
+def visualize_temporal_clusters_pyvista(all_temporal_clusters, df, sphere_radius=20, cluster_ids=None):
     plotter = pv.Plotter()
+    unique_ids = np.unique(cluster_ids) if cluster_ids is not None else None
 
-    for _, cluster in enumerate(all_temporal_clusters):
+    for i, cluster in enumerate(all_temporal_clusters):
+        # MODIFIED: use deterministic color based on cluster ID, grey for noise
+        if unique_ids is not None:
+            cid = unique_ids[i]
+            color = 'grey' if cid == -1 else _cluster_color(int(cid))
+            label = 'Noise' if cid == -1 else f'Cluster {int(cid)}'
+        else:
+            color = np.random.rand(3)
+            label = f'Cluster {i}'
 
         for temporal_cluster in cluster:
             x_coords = []
@@ -75,26 +108,23 @@ def visualize_temporal_clusters_pyvista(all_temporal_clusters, df, sphere_radius
                 y_coords.append(df.iloc[index, 1])
                 z_coords.append(time_frame)
 
-            # Create a point cloud
+            if not x_coords:
+                continue
+
             points = pv.PolyData(np.column_stack((x_coords, y_coords, z_coords)))
-
-            # Create a sphere glyph
             sphere = pv.Sphere(radius=sphere_radius)
-            glyphs = points.glyph(scale=False, geom=sphere)
+            glyphs = points.glyph(scale=False, geom=sphere, orient=False)  # FIXED: suppress orient warning
+            plotter.add_mesh(glyphs, color=color, label=label)
 
-            # Assign a unique color to the glyph
-            color = np.random.rand(3)
-
-            # Add the glyph to the plotter
-            plotter.add_mesh(glyphs, color=color)
-    
-    labels = dict(zlabel='Time (frame)', xlabel='X position (nm)', ylabel='Y position (nm)')
-    plotter.show_grid(**labels)
-    plotter.add_axes(**labels)
-    plotter.camera_position = 'xy'  # View from top-down perspective
+    # FIXED: show_grid uses xtitle/ytitle/ztitle; add_axes uses xlabel/ylabel/zlabel
+    plotter.show_grid(xtitle='X position (nm)', ytitle='Y position (nm)', ztitle='Time (frame)')
+    plotter.add_axes(xlabel='X position (nm)', ylabel='Y position (nm)', zlabel='Time (frame)')
+    plotter.add_legend()
+    plotter.camera_position = 'xy'
     plotter.show()
 
-def plot_2d_points_clusters(all_temporal_clusters, df):
+# MODIFIED: added cluster_ids parameter so labels show actual DBSCAN cluster IDs
+def plot_2d_points_clusters(all_temporal_clusters, df, cluster_ids=None):
     """Plot 2D scatter plot of localization points with clusters in different colors using plotly."""
     # Create a figure
     fig = go.Figure()
@@ -113,9 +143,8 @@ def plot_2d_points_clusters(all_temporal_clusters, df):
     marker_opacity = 0.6 if is_large_dataset else 1.0
     use_webgl = is_large_dataset
 
-    # Generate a color for each spatial cluster
-    colors = [f'rgb({np.random.randint(0,255)},{np.random.randint(0,255)},{np.random.randint(0,255)})' 
-             for _ in range(len(all_temporal_clusters))]
+    # MODIFIED: use actual cluster IDs for labels and deterministic colors
+    unique_ids = np.unique(cluster_ids) if cluster_ids is not None else None
 
     # Add points for each cluster
     for cluster_idx, cluster in enumerate(all_temporal_clusters):
@@ -123,7 +152,7 @@ def plot_2d_points_clusters(all_temporal_clusters, df):
         total_cluster_points = sum(len(temporal_cluster) for temporal_cluster in cluster)
         x_coords = np.empty(total_cluster_points)
         y_coords = np.empty(total_cluster_points)
-        
+
         # Fill arrays more efficiently
         idx = 0
         for temporal_cluster in cluster:
@@ -134,8 +163,20 @@ def plot_2d_points_clusters(all_temporal_clusters, df):
 
         # Add scatter plot for this cluster if we have points
         if len(x_coords) > 0:
-            cluster_name = "Noise" if cluster_idx == 0 else f'Cluster {cluster_idx}'
-            cluster_color = 'grey' if cluster_idx == 0 else colors[cluster_idx]
+            # MODIFIED: use actual cluster ID for label and color
+            if unique_ids is not None:
+                cid = unique_ids[cluster_idx]
+                is_noise = (cid == -1)
+                cluster_name = 'Noise' if is_noise else f'Cluster {int(cid)}'
+                if is_noise:
+                    cluster_color = 'grey'
+                else:
+                    r, g, b = _cluster_color(int(cid))
+                    cluster_color = f'rgb({int(r*255)},{int(g*255)},{int(b*255)})'
+            else:
+                is_noise = (cluster_idx == 0)
+                cluster_name = 'Noise' if is_noise else f'Cluster {cluster_idx}'
+                cluster_color = 'grey' if is_noise else f'rgb({np.random.randint(0,255)},{np.random.randint(0,255)},{np.random.randint(0,255)})'
             
             scatter_kwargs = dict(
                 x=x_coords,

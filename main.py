@@ -4,8 +4,9 @@ import sys, os
 import numpy as np
 import pandas as pd
 import math
+import h5py  # ADDED: for loading HDF5 localization files (e.g. from Picasso)
 
-from PyQt6.QtWidgets import QDialog, QPushButton, QApplication, QLabel, QMainWindow, QFileDialog, QTableWidgetItem, QMessageBox, QWidget, QVBoxLayout, QListWidgetItem, QDockWidget, QStatusBar, QProgressBar, QHBoxLayout, QLineEdit
+from PyQt6.QtWidgets import QDialog, QPushButton, QApplication, QLabel, QMainWindow, QFileDialog, QTableWidgetItem, QMessageBox, QWidget, QVBoxLayout, QListWidgetItem, QDockWidget, QStatusBar, QProgressBar, QHBoxLayout, QLineEdit, QInputDialog
 
 from PyQt6 import uic
 from PyQt6.QtCore import QThread, pyqtSignal, QMetaObject
@@ -26,6 +27,21 @@ import plotly.io as pio
 
 os.environ["TRAITSUI_TOOLKIT"] = "qt"
 os.environ["ETS_TOOLKIT"] = "qt"
+
+# ADDED: deterministic color for a given cluster ID — consistent across all plots
+def _cluster_color(cluster_id):
+    golden_ratio = 0.618033988749895
+    hue = (cluster_id * golden_ratio) % 1.0
+    h = hue * 6
+    c, m = 0.8, 0.2
+    x = c * (1 - abs(h % 2 - 1))
+    if   h < 1: r, g, b = c, x, 0
+    elif h < 2: r, g, b = x, c, 0
+    elif h < 3: r, g, b = 0, c, x
+    elif h < 4: r, g, b = 0, x, c
+    elif h < 5: r, g, b = x, 0, c
+    else:        r, g, b = c, 0, x
+    return (r + m, g + m, b + m)
 
 
 class AboutDialog(QDialog):
@@ -132,35 +148,61 @@ class DataHandler:
 
     def load_localization(self):
         file_dialog = QFileDialog()
-        file_path, _ = file_dialog.getOpenFileName(self.main_window, "Open Data File", "", "Text Files (*.txt)")
+        # ADDED: accept HDF5 files in addition to the original .txt format
+        file_path, _ = file_dialog.getOpenFileName(
+            self.main_window, "Open Data File", "",
+            "Localization Files (*.txt *.hdf5 *.h5);;Text Files (*.txt);;HDF5 Files (*.hdf5 *.h5)"
+        )
 
         if file_path:
             try:
-                # First try to read the file to validate format
-                with open(file_path, 'r') as f:
-                    # Skip header line
-                    header = f.readline()
-                    # Read first few lines to validate format
-                    first_line = f.readline().strip()
-                    if not first_line:
-                        raise ValueError("File is empty after header")
-                    
-                    # Split the line and validate number of columns
-                    columns = first_line.split()
-                    if len(columns) < 4:
-                        raise ValueError("File must have at least 4 columns")
-                    
-                    # Validate data types
-                    try:
-                        float(columns[0])  # First column should be float/int
-                        float(columns[1])  # Second column should be float/int
-                        int(columns[2])    # Third column should be integer
-                        float(columns[3])  # Fourth column should be float/int
-                    except ValueError as e:
-                        raise ValueError("Invalid data types in columns. Expected: float/int, float/int, int, float/int")
+                # ADDED: branch for HDF5 files (e.g. exported from Picasso)
+                if file_path.lower().endswith(('.hdf5', '.h5')):
+                    with h5py.File(file_path, 'r') as f:
+                        if 'locs' not in f:
+                            raise ValueError("HDF5 file does not contain a 'locs' dataset. Expected Picasso format.")
+                        locs = f['locs'][:]
+                        required = {'x', 'y', 'frame', 'photons'}
+                        available = set(locs.dtype.names) if locs.dtype.names else set()
+                        missing = required - available
+                        if missing:
+                            raise ValueError(f"HDF5 file is missing required columns: {missing}")
+                        # ADDED: ask user for pixel size to convert Picasso pixel coordinates to nanometers
+                        pixel_size, ok = QInputDialog.getDouble(
+                            self.main_window, "Pixel Size",
+                            "Enter camera pixel size (nm/pixel):\n"
+                            "(Picasso stores coordinates in pixels. This converts them to nm\n"
+                            "so the DBSCAN epsilon parameter works correctly.)",
+                            130.0, 1.0, 10000.0, 1
+                        )
+                        if not ok:
+                            return
+                        # Build DataFrame with columns in the order the app expects: x, y, frame, intensity
+                        self.localization_data = pd.DataFrame({
+                            'x':       locs['x'].astype(float) * pixel_size,
+                            'y':       locs['y'].astype(float) * pixel_size,
+                            'frame':   locs['frame'].astype(int),
+                            'photons': locs['photons'].astype(float),
+                        })
+                else:
+                    # Original .txt loading path (unchanged)
+                    with open(file_path, 'r') as f:
+                        header = f.readline()
+                        first_line = f.readline().strip()
+                        if not first_line:
+                            raise ValueError("File is empty after header")
+                        columns = first_line.split()
+                        if len(columns) < 4:
+                            raise ValueError("File must have at least 4 columns")
+                        try:
+                            float(columns[0])
+                            float(columns[1])
+                            int(columns[2])
+                            float(columns[3])
+                        except ValueError as e:
+                            raise ValueError("Invalid data types in columns. Expected: float/int, float/int, int, float/int")
+                    self.localization_data = pd.read_csv(file_path, delimiter=' ', header=1)
 
-                # If validation passes, load the file
-                self.localization_data = pd.read_csv(file_path, delimiter=' ', header=1)
                 self.localization_data_imported = True
                 self.main_window.localization_data = self.localization_data 
                 self.main_window.localization_data_imported = self.localization_data_imported
@@ -430,13 +472,18 @@ class MainWindow(QMainWindow):
         self.actionAbout.triggered.connect(self.show_about_dialog)
         self.actionModify_Attributes.triggered.connect(self.show_modify_attributes_dialog)
 
+        # ADDED: Export Cluster Data menu item (added programmatically to the File menu)
+        self.menuFile.addSeparator()
+        self.actionExportClusterData = self.menuFile.addAction("Export Cluster Data")
+        self.actionExportClusterData.triggered.connect(self.export_cluster_data)
+
         self.graph2dButton.clicked.connect(self.graph_2d_gaussian)
 
         self.preprocessingSwitch.mousePressEvent = self.preprocessing_clicked
         self.stoichiometrySwitch.mousePressEvent = self.stoichiometry_clicked
 
     def initialize_stoichiometry_graph(self):
-        plt.rc('font', family='Calibri')
+        plt.rc('font', family='Arial')  # FIXED: Calibri is Windows-only, Arial is available on macOS
 
         self.fig = Figure()
         self.ax = self.fig.add_subplot(111)
@@ -455,7 +502,7 @@ class MainWindow(QMainWindow):
     def initialize_blinking_graph(self):
 
         self.fig2, self.ax2 = plt.subplots(figsize=(10, 6))
-        
+
         self.ax2.hist([], bins='auto', edgecolor='white')
 
         self.ax2.set_xlabel("Number of Blinks")
@@ -464,6 +511,41 @@ class MainWindow(QMainWindow):
 
         self.canvas2 = FigureCanvasQTAgg(self.fig2)
         self.blinkGraph.layout().addWidget(self.canvas2)
+
+        self._blink_bars = None
+        self._blink_bar_data = []
+        self._blink_annotation = None
+        self.canvas2.mpl_connect('motion_notify_event', self._on_blink_hover)
+
+    def _on_blink_hover(self, event):
+        if event.inaxes != self.ax2 or self._blink_bars is None:
+            if self._blink_annotation:
+                self._blink_annotation.set_visible(False)
+                self.canvas2.draw_idle()
+            return
+
+        for i, bar in enumerate(self._blink_bars):
+            if bar.contains(event)[0] and i < len(self._blink_bar_data):
+                cid, count = self._blink_bar_data[i]
+                x = bar.get_x() + bar.get_width() / 2
+                y = bar.get_height()
+                label = f'Cluster {cid}\n{count} blinks'
+                if self._blink_annotation is None:
+                    self._blink_annotation = self.ax2.annotate(
+                        label, xy=(x, y), xytext=(0, 8), textcoords='offset points',
+                        ha='center', va='bottom', fontsize=8,
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='gray', alpha=0.9)
+                    )
+                else:
+                    self._blink_annotation.set_text(label)
+                    self._blink_annotation.xy = (x, y)
+                    self._blink_annotation.set_visible(True)
+                self.canvas2.draw_idle()
+                return
+
+        if self._blink_annotation:
+            self._blink_annotation.set_visible(False)
+            self.canvas2.draw_idle()
 
     def resource_path(self, relative_path):
         """ Get the absolute path to the resource, works in development and after PyInstaller packaging """
@@ -511,9 +593,20 @@ class MainWindow(QMainWindow):
         self.analyzer.perform_dbscan()
         self.analyzer.get_all_temporal_clusters()
         blinking_data = self.analyzer.get_blinking_data()
-        self.display_blinking_data(blinking_data)
-        self.plot_blinking(blinking_data)
-        
+        blinking_with_ids = self.analyzer.get_blinking_data_with_ids()
+        self.display_blinking_data(blinking_with_ids)
+        self.plot_blinking(blinking_with_ids)  # MODIFIED: pass ID-paired data for color coding
+
+        # ADDED: show DBSCAN cluster statistics after extraction
+        stats = self.analyzer.get_cluster_stats()
+        self.show_popup(
+            "Extraction Complete",
+            f"Total localizations:     {stats['total_localizations']}\n"
+            f"Kept (in clusters):      {stats['kept']}\n"
+            f"Filtered out (noise):    {stats['noise_filtered']}\n"
+            f"Clusters found:          {stats['n_clusters']}"
+        )
+
         # Enable all buttons after successful extraction
         self.pushButton.setEnabled(True)
         self.graphButton.setEnabled(True)
@@ -525,13 +618,18 @@ class MainWindow(QMainWindow):
                 update_plot_pyvista(self.localization_data)
         elif self.radioSpatial.isChecked():
             if self.analyzer:
-                visualize_spatial_clusters_pyvista(self.analyzer.all_temporal_clusters, self.localization_data)
+                # MODIFIED: pass cluster IDs for consistent color coding
+                visualize_spatial_clusters_pyvista(self.analyzer.all_temporal_clusters, self.localization_data,
+                                                   cluster_ids=self.analyzer.clusters_2d)
         else:
             if self.analyzer:
-                visualize_temporal_clusters_pyvista(self.analyzer.all_temporal_clusters, self.localization_data)
+                # MODIFIED: pass cluster IDs for consistent color coding
+                visualize_temporal_clusters_pyvista(self.analyzer.all_temporal_clusters, self.localization_data,
+                                                    cluster_ids=self.analyzer.clusters_2d)
 
-    def display_blinking_data(self, data):
-        text_to_display = "\n".join(str(item) for item in data)
+    # MODIFIED: now accepts (cluster_id, blink_count) pairs and displays both
+    def display_blinking_data(self, data_with_ids):
+        text_to_display = "\n".join(f"Cluster {cid}: {count} blinks" for cid, count in data_with_ids)
         self.blinkListDisplay.setText(text_to_display)
 
     def display_results(self, lam, pi, AIC, pi_std, lam_std, model):
@@ -597,17 +695,21 @@ class MainWindow(QMainWindow):
     def show_popup(self, title, message):
         QMessageBox.information(self, title, message)
 
-    def plot_blinking(self,blinking_data):
-
-        sorted_counts = sorted(blinking_data)
-
+    # MODIFIED: now accepts (cluster_id, blink_count) pairs and colors each bar by cluster ID
+    def plot_blinking(self, blinking_with_ids):
         self.ax2.clear()
-        # Plot the distribution of blinking events
-        self.ax2.hist(sorted_counts, bins=max(sorted_counts))
-        self.ax2.set_xlabel("Number of Blinks")
-        self.ax2.set_ylabel("Frequency")
+        self._blink_annotation = None  # reset annotation when data changes
 
-        np.savetxt("exported_data.csv", sorted_counts, delimiter=",")
+        cluster_ids = [cid for cid, _ in blinking_with_ids]
+        counts = [count for _, count in blinking_with_ids]
+        colors = [_cluster_color(cid) for cid in cluster_ids]
+
+        self._blink_bars = self.ax2.bar(range(len(cluster_ids)), counts, color=colors, edgecolor='gray', linewidth=0.5)
+        self._blink_bar_data = list(blinking_with_ids)
+        self.ax2.set_xticks([])  # MODIFIED: omit x-axis labels when too many clusters to read
+        self.ax2.set_xlabel("Cluster ID")
+        self.ax2.set_ylabel("Number of Blinks")
+
         self.canvas2.draw()
 
     def plot_dataset(self):
@@ -629,14 +731,28 @@ class MainWindow(QMainWindow):
             max_res = 8192
             alpha_scale = 0.8
             if self.radio2dOriginal.isChecked():
+                if self.local_precision <= 0:
+                    self.show_popup("Missing Precision",
+                        "Localization precision could not be estimated from this dataset.\n"
+                        "The Gaussian render requires a valid precision value.\n\n"
+                        "Try the 2D Points view instead.")
+                    return
                 self.analyzer.plot_original_gaussian(self.local_precision, alpha_scale=alpha_scale, intensity_scale=0.3, min_alpha=0.05, max_res=max_res)
             elif self.radio2dClusters.isChecked():
+                if self.local_precision <= 0:
+                    self.show_popup("Missing Precision",
+                        "Localization precision could not be estimated from this dataset.\n"
+                        "The Gaussian render requires a valid precision value.\n\n"
+                        "Try the 2D Points view instead.")
+                    return
                 self.analyzer.plot_gaussian_clusters(self.local_precision, alpha_scale=alpha_scale, intensity_scale=0.3, min_alpha=0.05, max_res=max_res)
             elif self.radio2dPoints.isChecked():
                 if not self.analyzer.all_temporal_clusters:
                     self.show_popup("No Data", "Please run the extraction algorithm first.")
                     return
-                plot_2d_points_clusters(self.analyzer.all_temporal_clusters, self.localization_data)
+                # MODIFIED: pass cluster IDs for correct labeling and color coding
+                plot_2d_points_clusters(self.analyzer.all_temporal_clusters, self.localization_data,
+                                        cluster_ids=self.analyzer.clusters_2d)
 
     def run_replicates(self):
         if self.blinking_data is None:
@@ -700,6 +816,19 @@ class MainWindow(QMainWindow):
             self.max_iter = dialog.get_max_iter()
             self.show_popup("Settings Updated", f"Maximum iterations has been set to {self.max_iter}")
 
+    # ADDED: export localization data with cluster IDs to a CSV file
+    def export_cluster_data(self):
+        """Save a CSV containing every localization with its DBSCAN cluster_id.
+        cluster_id = -1 means the localization was classified as noise and excluded."""
+        if not self.analyzer or self.analyzer.clusters_2d is None:
+            self.show_popup("No Data", "Please run the extraction algorithm first.")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Cluster Data", "cluster_data.csv", "CSV Files (*.csv)")
+        if file_path:
+            df = self.analyzer.get_localization_cluster_data()
+            df.to_csv(file_path, index=False)
+            self.show_popup("Export Complete", f"Cluster data saved to:\n{file_path}")
+
     def proceed_to_stoichiometry(self):
         """Switch to stoichiometry tab and transfer the extracted blink data."""
         if not self.analyzer or not self.analyzer.all_temporal_clusters:
@@ -708,19 +837,29 @@ class MainWindow(QMainWindow):
             
         # Get the blinking data
         blinking_data = self.analyzer.get_blinking_data()
-        
-        # Save the blinking data to a CSV file
-        np.savetxt("exported_data.csv", blinking_data, delimiter=",")
-        
+
+        # ADDED: warn if any cluster has >= 1000 blinks (likely an outlier)
+        blinking_with_ids = self.analyzer.get_blinking_data_with_ids()
+        outliers = [(cid, count) for cid, count in blinking_with_ids if count >= 1000]
+        if outliers:
+            outlier_lines = "\n".join(f"  Cluster {cid}: {count} blinks" for cid, count in outliers)
+            reply = QMessageBox.question(
+                self, "Outlier Warning",
+                f"The following clusters have ≥1000 blinks and may be outliers:\n\n{outlier_lines}\n\nProceed anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+
         # Load the data into the blinking_data variable
         self.blinking_data = np.array(blinking_data)
         self.blinking_data_imported = True
-        
+
         # Switch to stoichiometry tab
         self.stoichiometry_clicked(None)
-        
+
         # Update the file path label
-        self.blinkingFilePathLabel.setText("Loaded Blinking Dataset: exported_data.csv")
+        self.blinkingFilePathLabel.setText("Loaded Blinking Dataset: (from extraction)")
         
         # Enable the EM button since we now have data
         self.runEMButton.setEnabled(True)
@@ -730,6 +869,23 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    # ADDED: force light palette so hardcoded light colors in the UI look correct on macOS dark mode
+    from PyQt6.QtGui import QPalette, QColor
+    app.setStyle("Fusion")
+    light_palette = QPalette()
+    light_palette.setColor(QPalette.ColorRole.Window, QColor(240, 240, 240))
+    light_palette.setColor(QPalette.ColorRole.WindowText, QColor(0, 0, 0))
+    light_palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
+    light_palette.setColor(QPalette.ColorRole.AlternateBase, QColor(233, 233, 233))
+    light_palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0))
+    light_palette.setColor(QPalette.ColorRole.Button, QColor(240, 240, 240))
+    light_palette.setColor(QPalette.ColorRole.ButtonText, QColor(0, 0, 0))
+    light_palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
+    light_palette.setColor(QPalette.ColorRole.Highlight, QColor(0, 120, 215))
+    light_palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    app.setPalette(light_palette)
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

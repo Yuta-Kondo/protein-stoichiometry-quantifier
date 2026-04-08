@@ -88,9 +88,115 @@ class Cluster2d1d:
             return
 
         blinking_data = []
-        for spatial_cluster in self.all_temporal_clusters:
+        # FIXED: skip noise cluster (-1) — including it caused the EM algorithm to crash
+        for cluster_id, spatial_cluster in zip(np.unique(self.clusters_2d), self.all_temporal_clusters):
+            if cluster_id == -1:
+                continue
             blinking_data.append(len(spatial_cluster))
         return blinking_data
+
+    # ADDED: renders all localizations as Gaussian spots in a single color (no cluster coloring)
+    def plot_original_gaussian(self, sigma_nm, alpha_scale=0.5, intensity_scale=0.3, min_alpha=0.05, max_res=4096):
+        """Gaussian-blurred render of all localizations without cluster color coding."""
+        if self.clusters_2d is None:
+            print("Please run perform_dbscan() first.")
+            return
+
+        x_range_nm = self.x_positions.max() - self.x_positions.min()
+        y_range_nm = self.y_positions.max() - self.y_positions.min()
+
+        pixels_per_sigma = 5
+        required_pixels = max(x_range_nm, y_range_nm) / sigma_nm * pixels_per_sigma
+        grid_size = int(2 ** np.ceil(np.log2(required_pixels)))
+        grid_size = min(max(grid_size, 1024), max_res)
+        pixel_size_nm = max(x_range_nm, y_range_nm) / grid_size
+        sigma_pixels = sigma_nm / pixel_size_nm
+
+        image = np.zeros((grid_size, grid_size, 4))
+        x_scaled = (self.x_positions - self.x_positions.min()) / x_range_nm * (grid_size - 1)
+        y_scaled = (self.y_positions - self.y_positions.min()) / y_range_nm * (grid_size - 1)
+
+        kernel_size = int(4 * sigma_pixels)
+        x = np.linspace(-kernel_size, kernel_size, 2 * kernel_size + 1)
+        y = np.linspace(-kernel_size, kernel_size, 2 * kernel_size + 1)
+        xx, yy = np.meshgrid(x, y)
+        gaussian_kernel = np.exp(-(xx**2 + yy**2) / (2 * sigma_pixels**2))
+        gaussian_kernel /= gaussian_kernel.max()
+
+        intensities = self.data.iloc[:, 3].values
+        q1, q99 = np.percentile(intensities, [1, 99])
+        normalized_intensities = np.clip((intensities - q1) / (q99 - q1), 0, 1)
+        normalized_intensities = np.power(normalized_intensities, 0.5)
+
+        base_color = np.array([1.0, 1.0, 1.0])  # white for all localizations
+
+        for x, y, intensity in zip(x_scaled, y_scaled, normalized_intensities):
+            x, y = int(x), int(y)
+            alpha = np.clip(intensity * intensity_scale * alpha_scale + min_alpha, min_alpha, 1.0)
+            spot = np.zeros((2 * kernel_size + 1, 2 * kernel_size + 1, 4))
+            spot[..., :3] = base_color
+            spot[..., 3] = gaussian_kernel * alpha
+
+            x_min = max(x - kernel_size, 0)
+            x_max = min(x + kernel_size + 1, grid_size)
+            y_min = max(y - kernel_size, 0)
+            y_max = min(y + kernel_size + 1, grid_size)
+            spot_x_min = kernel_size - (x - x_min)
+            spot_x_max = spot_x_min + (x_max - x_min)
+            spot_y_min = kernel_size - (y - y_min)
+            spot_y_max = spot_y_min + (y_max - y_min)
+
+            spot_section = spot[spot_x_min:spot_x_max, spot_y_min:spot_y_max]
+            img_section = image[x_min:x_max, y_min:y_max]
+            alpha_spot = spot_section[..., 3:4]
+            alpha_img = img_section[..., 3:4]
+            new_alpha = alpha_spot + alpha_img * (1 - alpha_spot)
+            denominator = np.maximum(new_alpha, 1e-10)
+            new_colors = ((spot_section[..., :3] * alpha_spot + img_section[..., :3] * alpha_img * (1 - alpha_spot)) / denominator)
+            img_section[..., :3] = new_colors
+            img_section[..., 3:4] = new_alpha
+
+        fig, ax = plt.subplots(figsize=(10, 10))
+        ax.imshow(image, origin='lower',
+                  extent=[self.x_positions.min(), self.x_positions.max(),
+                          self.y_positions.min(), self.y_positions.max()],
+                  interpolation='nearest')
+        ax.set_title(f"All Localizations (σ = {sigma_nm:.1f} nm)")
+        ax.set_xlabel("X Position (nm)")
+        ax.set_ylabel("Y Position (nm)")
+        fig.show()
+
+    # --- ADDED: returns (cluster_id, blink_count) pairs, excluding noise ---
+    def get_blinking_data_with_ids(self):
+        """Returns a list of (cluster_id, blink_count) pairs, excluding noise (cluster_id = -1)."""
+        result = []
+        for cluster_id, spatial_cluster in zip(np.unique(self.clusters_2d), self.all_temporal_clusters):
+            if cluster_id == -1:
+                continue
+            result.append((int(cluster_id), len(spatial_cluster)))
+        return result
+
+    # --- ADDED: returns original localization data with a cluster_id column ---
+    def get_localization_cluster_data(self):
+        """Returns the localization DataFrame with a new 'cluster_id' column.
+        cluster_id = -1 means the localization was classified as noise and filtered out."""
+        result = self.data.copy()
+        result.insert(0, 'cluster_id', self.clusters_2d)
+        return result
+
+    # --- ADDED: returns DBSCAN clustering statistics ---
+    def get_cluster_stats(self):
+        """Returns a dict summarising the DBSCAN result:
+        total localizations, how many were filtered as noise, and how many clusters were found."""
+        total = len(self.clusters_2d)
+        noise = int(np.sum(self.clusters_2d == -1))
+        n_clusters = len(np.unique(self.clusters_2d[self.clusters_2d != -1]))
+        return {
+            'total_localizations': total,
+            'noise_filtered': noise,
+            'kept': total - noise,
+            'n_clusters': n_clusters,
+        }
 
     def plot_gaussian_clusters(self, sigma_nm, alpha_scale=0.5, intensity_scale=0.3, min_alpha=0.05, max_res=4096):
         """
@@ -200,6 +306,17 @@ class Cluster2d1d:
                 extent=[self.x_positions.min(), self.x_positions.max(),
                         self.y_positions.min(), self.y_positions.max()],
                 interpolation='nearest')
+
+        # --- ADDED: cluster ID labels at each cluster centroid ---
+        for cluster_id in unique_clusters:
+            if cluster_id == -1:
+                continue
+            mask = (self.clusters_2d == cluster_id)
+            cx_nm = float(self.x_positions[mask].mean())
+            cy_nm = float(self.y_positions[mask].mean())
+            ax.text(cx_nm, cy_nm, str(cluster_id), color='white', fontsize=7,
+                    ha='center', va='center', fontweight='bold',
+                    bbox=dict(facecolor='black', alpha=0.4, pad=1, linewidth=0))
 
         # Scale bar
         scale_bar_length = x_range_nm / 10

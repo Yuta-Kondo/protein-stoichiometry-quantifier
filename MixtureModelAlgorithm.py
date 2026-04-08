@@ -327,7 +327,7 @@ class EM1:
         # Calculate pi
         m_c = np.sum(r, axis=0, keepdims=True)
 
-        self.pi = np.ones((1, 1))
+        self.pi = np.ones(1)  # FIXED: was (1,1) 2D array, causing scalar assignment error
 
         # Calculate lambda
         X = self.X
