@@ -501,14 +501,17 @@ class MainWindow(QMainWindow):
 
     def initialize_blinking_graph(self):
 
-        self.fig2, self.ax2 = plt.subplots(figsize=(10, 6))
+        self.fig2, (self.ax2, self.ax3) = plt.subplots(1, 2, figsize=(14, 5))
 
-        self.ax2.hist([], bins='auto', edgecolor='white')
-
-        self.ax2.set_xlabel("Number of Blinks")
-        self.ax2.set_ylabel("Frequency")
+        self.ax2.set_xlabel("Cluster ID")
+        self.ax2.set_ylabel("Number of Blinks")
         self.ax2.tick_params(axis='both', labelsize=9)
 
+        self.ax3.set_xlabel("Number of Blinks")
+        self.ax3.set_ylabel("Frequency")
+        self.ax3.tick_params(axis='both', labelsize=9)
+
+        self.fig2.tight_layout()
         self.canvas2 = FigureCanvasQTAgg(self.fig2)
         self.blinkGraph.layout().addWidget(self.canvas2)
 
@@ -698,6 +701,7 @@ class MainWindow(QMainWindow):
     # MODIFIED: now accepts (cluster_id, blink_count) pairs and colors each bar by cluster ID
     def plot_blinking(self, blinking_with_ids):
         self.ax2.clear()
+        self.ax3.clear()
         self._blink_annotation = None  # reset annotation when data changes
 
         cluster_ids = [cid for cid, _ in blinking_with_ids]
@@ -706,10 +710,15 @@ class MainWindow(QMainWindow):
 
         self._blink_bars = self.ax2.bar(range(len(cluster_ids)), counts, color=colors, edgecolor='gray', linewidth=0.5)
         self._blink_bar_data = list(blinking_with_ids)
-        self.ax2.set_xticks([])  # MODIFIED: omit x-axis labels when too many clusters to read
+        self.ax2.set_xticks([])
         self.ax2.set_xlabel("Cluster ID")
         self.ax2.set_ylabel("Number of Blinks")
 
+        self.ax3.hist(counts, bins='auto', color='steelblue', edgecolor='white')
+        self.ax3.set_xlabel("Number of Blinks")
+        self.ax3.set_ylabel("Frequency")
+
+        self.fig2.tight_layout()
         self.canvas2.draw()
 
     def plot_dataset(self):
