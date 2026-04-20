@@ -167,11 +167,11 @@ class DataHandler:
                         missing = required - available
                         if missing:
                             raise ValueError(f"HDF5 file is missing required columns: {missing}")
-                        # ADDED: ask user for pixel size to convert Picasso pixel coordinates to nanometers
+                        # ADDED: ask user for pixel size to convert pixel coordinates to nanometers
                         pixel_size, ok = QInputDialog.getDouble(
                             self.main_window, "Pixel Size",
                             "Enter camera pixel size (nm/pixel):\n"
-                            "(Picasso stores coordinates in pixels. This converts them to nm\n"
+                            "(Coordinates will be converted from pixels to nm\n"
                             "so the DBSCAN epsilon parameter works correctly.)",
                             130.0, 1.0, 10000.0, 1
                         )
